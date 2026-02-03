@@ -63,6 +63,17 @@ The bot will log in and register slash commands. They may take a few minutes to 
 - **DM flow**: The DM uses `/next` to call on someone, then `/queuelist` to see who's waiting
 - **Reset**: Use `/clear` between scenes or when starting fresh
 
+## Compliance
+
+RaiseHand is built to follow [Discord’s Terms of Service](https://discord.com/terms) and [Discord Developer Policy](https://dis.gd/discord-developer-policy):
+
+- **Minimal intents:** Uses only the `Guilds` intent. No Message Content intent; the bot uses slash commands only.
+- **No credentials:** Never requests or stores passwords, tokens, or other login data.
+- **Data use:** Queue data (channel and user IDs, display names) is used only to run the queue and is kept in memory only—not stored on disk or shared with third parties. See [PRIVACY.md](PRIVACY.md) for details.
+- **Reporting:** To report issues or policy concerns, open an issue in this repo or [report to Discord](https://support.discord.com/hc/en-us/requests/new).
+
+For verification and bot directories, set your application’s **Privacy Policy** URL in the [Discord Developer Portal](https://discord.com/developers/applications) to this file (e.g. the raw GitHub URL of `Server/PRIVACY.md`).
+
 ## License
 
 MIT
