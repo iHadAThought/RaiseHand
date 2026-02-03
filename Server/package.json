@@ -1,0 +1,17 @@
+{
+  "name": "raisehand-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for D&D groups with raise hands feature to manage speaking order",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "register": "node scripts/register-commands.js"
+  },
+  "keywords": ["discord", "bot", "dnd", "raise-hand"],
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
+  }
+}
