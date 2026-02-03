@@ -1,6 +1,6 @@
 # RaiseHand — D&D Discord Bot
 
-A Discord bot that helps D&D groups manage speaking order with a **raise hands** queue. Players raise their hand when they want to speak, and the DM (or anyone) can call on people one at a time to keep things orderly.
+A Discord bot that helps D&D groups manage speaking order with a **raise hands** queue. Players raise their hand when they want to speak, and the DM (or anyone) can call on people one at a time to keep things orderly. Visible queue positions are capped at **99** (internally the queue can be longer).
 
 ## Commands
 

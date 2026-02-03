@@ -10,8 +10,8 @@ Great for **D&D**, **game nights**, **meetings**, and any voice/video call where
 
 | Part | What it is |
 |------|------------|
-| **Server** | A Discord bot that runs the queue: `/queue`, `/lower`, `/next`, `/queuelist`, `/clear`. Each channel has its own queue. |
-| **Client** | A **BetterDiscord** plugin that shows a hand icon (and your queue number) on your video when you’re in the queue — both on your preview and (when possible) in the stream others see. |
+| **Server** | A Discord bot that runs the queue: `/queue`, `/lower`, `/next`, `/queuelist`, `/clear`. Each channel has its own queue, and visible queue numbers are capped at **99**. |
+| **Client** | A **BetterDiscord** plugin that shows a hand icon (and your queue number, capped at **99**) on your video when you’re in the queue — both on your preview and (when possible) in the stream others see. |
 
 - **Bot only:** Install and run the **Server** bot; everyone can use the slash commands. No plugin required.
 - **Full experience:** Install the **Server** bot *and* the **Client** plugin; then when you `/queue`, the hand appears on your video for you and others.

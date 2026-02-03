@@ -1,20 +1,25 @@
 import { SlashCommandBuilder, MessageFlags } from 'discord.js';
 import { queueManager } from '../queueManager.js';
 
-/** Magic suffix for RaiseHand plugin — plugin looks for these in ephemeral reply text. Include position for overlay. */
+const MAX_POSITION = 99;
+function displayPosition(position) {
+  return Math.min(position, MAX_POSITION);
+}
+
+/** Magic suffix for RaiseHand plugin — plugin looks for these in ephemeral reply text. Include position for overlay (capped at 99). */
 function markerShow(position) {
-  return `\u200BRaiseHand:SHOW:${position}`;
+  return `\u200BRaiseHand:SHOW:${displayPosition(position)}`;
 }
 const MARKER_LOWER = "\u200BRaiseHand:LOWER";
 /** Build position-update marker so plugin can update numbers when /next is used (position:userId pairs). Empty queue = POS: so plugin can hide hand for the person who was called. */
 function markerPositions(userIds) {
-  const parts = userIds.length ? userIds.map((id, i) => `${i + 1}:${id}`).join(":") : "";
+  const parts = userIds.length ? userIds.map((id, i) => `${displayPosition(i + 1)}:${id}`).join(":") : "";
   return `\u200BRaiseHand:POS:${parts}`;
 }
 
 /** Format user for display in queue */
 function formatQueueLine(index, member) {
-  return `${index}. ✋ ${member}`;
+  return `${displayPosition(index)}. ✋ ${member}`;
 }
 
 export const commands = [
@@ -51,14 +56,15 @@ export async function handleCommand(interaction) {
 
   if (commandName === 'raise') {
     const { added, position } = queueManager.raiseHand(channelId, userId);
+    const visiblePos = displayPosition(position);
     if (added) {
       await interaction.reply({
-        content: `✋ You're in the speaking queue (position **${position}**). Use \`/queuelist\` to see the order.${markerShow(position)}`,
+        content: `✋ You're in the speaking queue (position **${visiblePos}**). Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
         flags: MessageFlags.Ephemeral,
       });
     } else {
       await interaction.reply({
-        content: `You're already in the queue at position **${position}**. Use \`/lower\` if you want to remove yourself.${markerShow(position)}`,
+        content: `You're already in the queue at position **${visiblePos}**. Use \`/lower\` if you want to remove yourself.${markerShow(visiblePos)}`,
         flags: MessageFlags.Ephemeral,
       });
     }
@@ -83,11 +89,12 @@ export async function handleCommand(interaction) {
 
   if (commandName === 'queue') {
     const { added, position } = queueManager.raiseHand(channelId, userId);
+    const visiblePos = displayPosition(position);
     const positionText = added
-      ? `You're in the speaking queue (position **${position}**).`
-      : `You're already in the queue at position **${position}**.`;
+      ? `You're in the speaking queue (position **${visiblePos}**).`
+      : `You're already in the queue at position **${visiblePos}**.`;
     await interaction.reply({
-      content: `✋ Hand raised. ${positionText} Use \`/queuelist\` to see the order.${markerShow(position)}`,
+      content: `✋ Hand raised. ${positionText} Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
       flags: MessageFlags.Ephemeral,
     });
     return;
