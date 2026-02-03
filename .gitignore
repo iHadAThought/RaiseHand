@@ -2,6 +2,9 @@
 .env
 *.env.local
 
+#Other
+BETTERDISCORD_SUBMISSION.md 
+
 # Dependencies
 node_modules/
 

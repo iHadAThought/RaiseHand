@@ -1,8 +1,8 @@
 /**
  * @name RaiseHand
  * @author RaiseHand
- * @description Shows a hand on your video when you use /queue; hides it with /lower. Works with the RaiseHand Discord bot.
- * @version 1.3.0
+ * @description Shows a hand overlay on your video when you use /queue; hides it with /lower. Works with the RaiseHand Discord bot.
+ * @version 1.4.0
  */
 
 const MARKER_SHOW_PREFIX = "RaiseHand:SHOW";
@@ -29,14 +29,20 @@ function parsePosMarker(text) {
   }
   return map;
 }
+// Cache webpack module to avoid repeated searches (BetterDiscord guideline: no wasting hardware resources)
+let cachedUserModule = null;
 function getCurrentUserId() {
   try {
-    const mod = BdApi.Webpack.getModule(m => m.getCurrentUser && typeof m.getCurrentUser === "function");
-    if (mod && mod.getCurrentUser) return mod.getCurrentUser().id;
-    const byProps = BdApi.Webpack.getModule(m => m.getCurrentUser != null && m.getUser != null);
-    if (byProps && byProps.getCurrentUser) return byProps.getCurrentUser().id;
+    if (!cachedUserModule) {
+      cachedUserModule = BdApi.Webpack.getModule(m => m.getCurrentUser && typeof m.getCurrentUser === "function");
+      if (!cachedUserModule) cachedUserModule = BdApi.Webpack.getModule(m => m.getCurrentUser != null && m.getUser != null);
+    }
+    if (cachedUserModule && cachedUserModule.getCurrentUser) return cachedUserModule.getCurrentUser().id;
   } catch (_) {}
   return null;
+}
+function clearUserModuleCache() {
+  cachedUserModule = null;
 }
 
 // Hand outline based on the 🤚 emoji (user-provided SVG path)
@@ -45,138 +51,6 @@ const HAND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" 
 </svg>`;
 
 const CSS_ID = "RaiseHand-Styles";
-
-function compositeHandOntoVideoStream(originalStream, videoConstraints, queuePosition) {
-  const videoTrack = originalStream.getVideoTracks()[0];
-  if (!videoTrack) return Promise.resolve(originalStream);
-
-  const stream = new MediaStream(originalStream.getTracks());
-  const inputVideo = document.createElement("video");
-  inputVideo.srcObject = new MediaStream([videoTrack]);
-  inputVideo.muted = true;
-  inputVideo.playsInline = true;
-  inputVideo.autoplay = true;
-  inputVideo.setAttribute("playsinline", "");
-  inputVideo.style.cssText = "position:absolute;width:0;height:0;opacity:0;pointer-events:none;";
-
-  return new Promise((resolve) => {
-    function tryStart() {
-      const w = inputVideo.videoWidth;
-      const h = inputVideo.videoHeight;
-      if (!w || !h) return;
-      inputVideo.onloadedmetadata = null;
-      inputVideo.onloadeddata = null;
-
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-
-      const handImg = new Image();
-      handImg.crossOrigin = "anonymous";
-      const svgBlob = new Blob([HAND_SVG], { type: "image/svg+xml" });
-      handImg.src = URL.createObjectURL(svgBlob);
-
-      let rafId = null;
-      const draw = () => {
-        if (inputVideo.readyState >= 2) {
-          ctx.drawImage(inputVideo, 0, 0, w, h);
-          if (handImg.complete && handImg.naturalWidth) {
-            const handSize = Math.min(w, h) * 0.4;
-            const x = (w - handSize) / 2 + handSize * 0.08;
-            const y = (h - handSize) / 2 - handSize * 0.08;
-            const cx = x + handSize / 2;
-            // Badge (blue circle) position in bottom-right of the hand
-            const badgeRadius = handSize * 0.18;
-            const badgeX = x + handSize * 0.78;
-            const badgeY = y + handSize * 0.78;
-            const numX = badgeX;
-            const numY = badgeY;
-            ctx.shadowColor = "rgba(0,0,0,0.85)";
-            ctx.shadowBlur = 12;
-            ctx.save();
-            ctx.translate(cx, y + handSize / 2);
-            ctx.scale(-1, 1);
-            ctx.translate(-cx, -(y + handSize / 2));
-            ctx.drawImage(handImg, x, y, handSize, handSize);
-            // Draw blue circular badge under the number
-            const grad = ctx.createRadialGradient(
-              badgeX - badgeRadius * 0.3,
-              badgeY - badgeRadius * 0.3,
-              badgeRadius * 0.2,
-              badgeX,
-              badgeY,
-              badgeRadius
-            );
-            grad.addColorStop(0, "#6ae0ff");
-            grad.addColorStop(1, "#1e7cff");
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.lineWidth = Math.max(2, badgeRadius * 0.14);
-            ctx.strokeStyle = "rgba(255,255,255,0.9)";
-            ctx.stroke();
-            ctx.restore();
-            ctx.shadowBlur = 0;
-            if (queuePosition != null && queuePosition >= 1) {
-              const fontSize = Math.max(18, handSize * 0.5);
-              ctx.font = `bold ${fontSize}px sans-serif`;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "middle";
-              ctx.shadowColor = "rgba(0,0,0,0.95)";
-              ctx.shadowBlur = 6;
-              ctx.strokeStyle = "rgba(0,0,0,0.6)";
-              ctx.lineWidth = Math.max(2, fontSize * 0.12);
-              // Mirror number to match mirrored hand (Discord/video can mirror preview)
-              ctx.save();
-              ctx.translate(numX, numY);
-              ctx.scale(-1, 1);
-              ctx.translate(-numX, -numY);
-              ctx.strokeText(String(queuePosition), numX, numY);
-              ctx.fillStyle = "white";
-              ctx.fillText(String(queuePosition), numX, numY);
-              ctx.restore();
-              ctx.shadowBlur = 0;
-            }
-          }
-        }
-        rafId = requestAnimationFrame(draw);
-      };
-
-      handImg.onload = () => {
-        document.body.appendChild(inputVideo);
-        inputVideo.play().catch(() => {});
-        const fps = 30;
-        const outputStream = canvas.captureStream(fps);
-        draw();
-        stream.removeTrack(videoTrack);
-        const compositeTrack = outputStream.getVideoTracks()[0];
-        if (compositeTrack) {
-          if (videoTrack.label) compositeTrack.label = videoTrack.label;
-          stream.addTrack(compositeTrack);
-        }
-        compositeTrack.addEventListener("ended", () => {
-          if (rafId != null) cancelAnimationFrame(rafId);
-          inputVideo.srcObject = null;
-          inputVideo.remove();
-          try { URL.revokeObjectURL(handImg.src); } catch (_) {}
-        });
-        videoTrack.stop();
-        resolve(stream);
-      };
-      handImg.onerror = () => {
-        inputVideo.remove();
-        try { URL.revokeObjectURL(handImg.src); } catch (_) {}
-        resolve(originalStream);
-      };
-    }
-
-    inputVideo.onloadedmetadata = tryStart;
-    inputVideo.onloadeddata = tryStart;
-    inputVideo.play().catch(() => {});
-  });
-}
 
 function addOverlayStyles() {
   if (document.getElementById(CSS_ID)) return;
@@ -246,8 +120,6 @@ function createHandOverlayEl(queuePosition) {
 
 module.exports = class RaiseHand {
   constructor() {
-    this.originalGetUserMedia = null;
-    this.getUserMediaWrapper = null;
     this.observer = null;
     this.messageObserver = null;
     this.overlays = new Set();
@@ -377,27 +249,6 @@ module.exports = class RaiseHand {
       this.observer = new MutationObserver(() => this.scanVideos());
       this.observer.observe(app, { childList: true, subtree: true });
     }
-
-    const self = this;
-    const dm = navigator.mediaDevices;
-    if (!dm) return;
-    this.originalGetUserMedia = dm.getUserMedia.bind(dm);
-    this.getUserMediaWrapper = function (constraints) {
-      return self.originalGetUserMedia(constraints).then((stream) => {
-        if (!self.handVisible || !constraints || !constraints.video) return stream;
-        return compositeHandOntoVideoStream(stream, constraints.video, self.queuePosition);
-      });
-    };
-    try {
-      Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
-        configurable: true,
-        enumerable: true,
-        get: function () { return self.getUserMediaWrapper; },
-        set: function () {}
-      });
-    } catch (_) {
-      navigator.mediaDevices.getUserMedia = this.getUserMediaWrapper;
-    }
   }
 
   stop() {
@@ -411,19 +262,6 @@ module.exports = class RaiseHand {
     }
     this.removeAllOverlays();
     BdApi.DOM.removeStyle(CSS_ID);
-
-    if (this.originalGetUserMedia && navigator.mediaDevices) {
-      try {
-        Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
-          configurable: true,
-          enumerable: true,
-          value: this.originalGetUserMedia
-        });
-      } catch (_) {
-        navigator.mediaDevices.getUserMedia = this.originalGetUserMedia;
-      }
-      this.originalGetUserMedia = null;
-      this.getUserMediaWrapper = null;
-    }
+    clearUserModuleCache();
   }
 };
