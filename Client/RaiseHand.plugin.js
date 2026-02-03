@@ -86,8 +86,12 @@ function compositeHandOntoVideoStream(originalStream, videoConstraints, queuePos
             const x = (w - handSize) / 2 + handSize * 0.08;
             const y = (h - handSize) / 2 - handSize * 0.08;
             const cx = x + handSize / 2;
-            const numY = y + handSize * 0.75;
-            const numX = x + handSize * 0.52;
+            // Badge (blue circle) position in bottom-right of the hand
+            const badgeRadius = handSize * 0.18;
+            const badgeX = x + handSize * 0.78;
+            const badgeY = y + handSize * 0.78;
+            const numX = badgeX;
+            const numY = badgeY;
             ctx.shadowColor = "rgba(0,0,0,0.85)";
             ctx.shadowBlur = 12;
             ctx.save();
@@ -95,6 +99,24 @@ function compositeHandOntoVideoStream(originalStream, videoConstraints, queuePos
             ctx.scale(-1, 1);
             ctx.translate(-cx, -(y + handSize / 2));
             ctx.drawImage(handImg, x, y, handSize, handSize);
+            // Draw blue circular badge under the number
+            const grad = ctx.createRadialGradient(
+              badgeX - badgeRadius * 0.3,
+              badgeY - badgeRadius * 0.3,
+              badgeRadius * 0.2,
+              badgeX,
+              badgeY,
+              badgeRadius
+            );
+            grad.addColorStop(0, "#6ae0ff");
+            grad.addColorStop(1, "#1e7cff");
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = Math.max(2, badgeRadius * 0.14);
+            ctx.strokeStyle = "rgba(255,255,255,0.9)";
+            ctx.stroke();
             ctx.restore();
             ctx.shadowBlur = 0;
             if (queuePosition != null && queuePosition >= 1) {
@@ -177,13 +199,23 @@ function addOverlayStyles() {
       filter: drop-shadow(0 3px 12px rgba(0,0,0,0.85)) drop-shadow(0 1px 3px rgba(0,0,0,0.5)) !important;
       transform: translate(6%, -6%) scaleX(-1) !important;
     }
-    .raisehand-overlay-wrap .raisehand-queue-num {
+    .raisehand-overlay-wrap .raisehand-badge {
       position: absolute !important;
-      left: 52% !important;
-      top: 75% !important;
-      /* Hand is mirrored; let number mirror with it */
-      transform: translate(-50%, -50%) !important;
-      font: bold 3.2em sans-serif !important;
+      right: -4% !important;
+      bottom: -4% !important;
+      width: 34% !important;
+      aspect-ratio: 1 / 1 !important;
+      border-radius: 999px !important;
+      background: radial-gradient(circle at 30% 20%, #6ae0ff, #1e7cff) !important;
+      box-shadow: 0 0 10px rgba(0,0,0,0.9), 0 0 22px rgba(64,156,255,0.95) !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+    }
+    .raisehand-overlay-wrap .raisehand-queue-num {
+      position: static !important;
+      transform: none !important;
+      font: bold 2.6em sans-serif !important;
       color: white !important;
       text-shadow: 0 0 6px rgba(0,0,0,0.95), 0 2px 10px rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,0.7) !important;
       pointer-events: none !important;
@@ -200,10 +232,13 @@ function createHandOverlayEl(queuePosition) {
   icon.className = "raisehand-icon";
   icon.innerHTML = HAND_SVG;
   if (queuePosition != null && queuePosition >= 1) {
+    const badge = document.createElement("div");
+    badge.className = "raisehand-badge";
     const numEl = document.createElement("span");
     numEl.className = "raisehand-queue-num";
     numEl.textContent = String(queuePosition);
-    icon.appendChild(numEl);
+    badge.appendChild(numEl);
+    icon.appendChild(badge);
   }
   wrap.appendChild(icon);
   return wrap;
