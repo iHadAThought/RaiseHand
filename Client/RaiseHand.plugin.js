@@ -1,8 +1,8 @@
 /**
  * @name RaiseHand
  * @author RaiseHand
- * @description Shows a hand overlay on your video when you use /queue; hides it with /lower. Works with the RaiseHand Discord bot.
- * @version 1.4.0
+ * @description Shows a hand (and queue number) on your video when you use /queue. Your self-view shows the hand; other participants with the plugin see the hand on your video too (overlay). Hide with /lower. Works with the RaiseHand Discord bot.
+ * @version 1.6.0
  */
 
 const MARKER_SHOW_PREFIX = "RaiseHand:SHOW";
@@ -52,6 +52,135 @@ const HAND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" 
 
 const CSS_ID = "RaiseHand-Styles";
 
+function compositeHandOntoVideoStream(originalStream, queuePosition) {
+  const videoTrack = originalStream.getVideoTracks()[0];
+  if (!videoTrack) return Promise.resolve(originalStream);
+
+  const stream = new MediaStream(originalStream.getTracks());
+  const inputVideo = document.createElement("video");
+  inputVideo.srcObject = new MediaStream([videoTrack]);
+  inputVideo.muted = true;
+  inputVideo.playsInline = true;
+  inputVideo.autoplay = true;
+  inputVideo.setAttribute("playsinline", "");
+  inputVideo.style.cssText = "position:absolute;width:0;height:0;opacity:0;pointer-events:none;";
+
+  return new Promise((resolve) => {
+    function tryStart() {
+      const w = inputVideo.videoWidth;
+      const h = inputVideo.videoHeight;
+      if (!w || !h) return;
+      inputVideo.onloadedmetadata = null;
+      inputVideo.onloadeddata = null;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+
+      const handImg = new Image();
+      handImg.crossOrigin = "anonymous";
+      const svgBlob = new Blob([HAND_SVG], { type: "image/svg+xml" });
+      handImg.src = URL.createObjectURL(svgBlob);
+
+      let rafId = null;
+      const draw = () => {
+        if (inputVideo.readyState >= 2) {
+          ctx.drawImage(inputVideo, 0, 0, w, h);
+          if (handImg.complete && handImg.naturalWidth) {
+            const handSize = Math.min(w, h) * 0.4;
+            const x = (w - handSize) / 2 + handSize * 0.08;
+            const y = (h - handSize) / 2 - handSize * 0.08;
+            const cx = x + handSize / 2;
+            const badgeRadius = handSize * 0.18;
+            const badgeX = x + handSize * 0.78;
+            const badgeY = y + handSize * 0.78;
+            const numX = badgeX;
+            const numY = badgeY;
+            ctx.shadowColor = "rgba(0,0,0,0.85)";
+            ctx.shadowBlur = 12;
+            ctx.save();
+            ctx.translate(cx, y + handSize / 2);
+            ctx.scale(-1, 1);
+            ctx.translate(-cx, -(y + handSize / 2));
+            ctx.drawImage(handImg, x, y, handSize, handSize);
+            const grad = ctx.createRadialGradient(
+              badgeX - badgeRadius * 0.3,
+              badgeY - badgeRadius * 0.3,
+              badgeRadius * 0.2,
+              badgeX,
+              badgeY,
+              badgeRadius
+            );
+            grad.addColorStop(0, "#6ae0ff");
+            grad.addColorStop(1, "#1e7cff");
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = Math.max(2, badgeRadius * 0.14);
+            ctx.strokeStyle = "rgba(255,255,255,0.9)";
+            ctx.stroke();
+            ctx.restore();
+            ctx.shadowBlur = 0;
+            if (queuePosition != null && queuePosition >= 1) {
+              const fontSize = Math.max(18, handSize * 0.5);
+              ctx.font = `bold ${fontSize}px sans-serif`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.shadowColor = "rgba(0,0,0,0.95)";
+              ctx.shadowBlur = 6;
+              ctx.strokeStyle = "rgba(0,0,0,0.6)";
+              ctx.lineWidth = Math.max(2, fontSize * 0.12);
+              ctx.save();
+              ctx.translate(numX, numY);
+              ctx.scale(-1, 1);
+              ctx.translate(-numX, -numY);
+              ctx.strokeText(String(queuePosition), numX, numY);
+              ctx.fillStyle = "white";
+              ctx.fillText(String(queuePosition), numX, numY);
+              ctx.restore();
+              ctx.shadowBlur = 0;
+            }
+          }
+        }
+        rafId = requestAnimationFrame(draw);
+      };
+
+      handImg.onload = () => {
+        document.body.appendChild(inputVideo);
+        inputVideo.play().catch(() => {});
+        const fps = 30;
+        const outputStream = canvas.captureStream(fps);
+        draw();
+        stream.removeTrack(videoTrack);
+        const compositeTrack = outputStream.getVideoTracks()[0];
+        if (compositeTrack) {
+          if (videoTrack.label) compositeTrack.label = videoTrack.label;
+          stream.addTrack(compositeTrack);
+        }
+        compositeTrack.addEventListener("ended", () => {
+          if (rafId != null) cancelAnimationFrame(rafId);
+          inputVideo.srcObject = null;
+          inputVideo.remove();
+          try { URL.revokeObjectURL(handImg.src); } catch (_) {}
+        });
+        videoTrack.stop();
+        resolve(stream);
+      };
+      handImg.onerror = () => {
+        inputVideo.remove();
+        try { URL.revokeObjectURL(handImg.src); } catch (_) {}
+        resolve(originalStream);
+      };
+    }
+
+    inputVideo.onloadedmetadata = tryStart;
+    inputVideo.onloadeddata = tryStart;
+    inputVideo.play().catch(() => {});
+  });
+}
+
 function addOverlayStyles() {
   if (document.getElementById(CSS_ID)) return;
   const css = `
@@ -71,7 +200,7 @@ function addOverlayStyles() {
       max-width: 220px !important;
       color: white !important;
       filter: drop-shadow(0 3px 12px rgba(0,0,0,0.85)) drop-shadow(0 1px 3px rgba(0,0,0,0.5)) !important;
-      transform: translate(6%, -6%) scaleX(-1) !important;
+      transform: translate(6%, -6%) scaleX(-1) !important; /* mirror hand horizontally */
     }
     .raisehand-overlay-wrap .raisehand-badge {
       position: absolute !important;
@@ -88,7 +217,7 @@ function addOverlayStyles() {
     }
     .raisehand-overlay-wrap .raisehand-queue-num {
       position: static !important;
-      transform: none !important;
+      transform: scaleX(-1) !important; /* counter-mirror so number reads correctly */
       font: bold 2.6em sans-serif !important;
       color: white !important;
       text-shadow: 0 0 6px rgba(0,0,0,0.95), 0 2px 10px rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,0.7) !important;
@@ -118,13 +247,82 @@ function createHandOverlayEl(queuePosition) {
   return wrap;
 }
 
+/** Walk up from a video element to find the participant's user id (for remote videos so everyone's plugin can draw the hand). */
+function getUserIdForVideo(video) {
+  if (!video || !video.parentElement) return null;
+  let el = video;
+  for (let i = 0; i < 25 && el; i++) {
+    const uid = el.getAttribute && el.getAttribute("data-user-id");
+    if (uid) return uid.trim();
+    const listId = el.getAttribute && el.getAttribute("data-list-item-id");
+    if (listId && listId.startsWith("member-")) return listId.replace(/^member\-/, "").trim();
+    const memberId = el.getAttribute && el.getAttribute("data-member-id");
+    if (memberId) return memberId.trim();
+    const idAttr = el.getAttribute && el.getAttribute("id");
+    if (idAttr && /^\d{17,20}$/.test(idAttr)) return idAttr;
+    el = el.parentElement;
+  }
+  const container = video.closest && video.closest("[data-list-item-id], [data-user-id], [id]");
+  if (container) {
+    const u = container.getAttribute("data-user-id") || container.getAttribute("data-member-id");
+    if (u) return u.trim();
+    const lid = container.getAttribute("data-list-item-id");
+    if (lid && lid.startsWith("member-")) return lid.replace(/^member\-/, "").trim();
+    const id = container.getAttribute("id");
+    if (id && /^\d{17,20}$/.test(id)) return id;
+  }
+  const userLink = video.closest && video.closest("a[href*='/users/']");
+  if (userLink && userLink.href) {
+    const m = userLink.href.match(/\/users\/(\d{17,20})/);
+    if (m) return m[1];
+  }
+  const root = video.closest && video.closest("#app-mount");
+  if (root) {
+    const subtree = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
+    let cur = video;
+    while (cur && cur !== root) {
+      const parent = cur.parentElement;
+      if (!parent) break;
+      const links = parent.querySelectorAll && parent.querySelectorAll("a[href*='/users/']");
+      if (links && links.length) {
+        for (let j = 0; j < links.length; j++) {
+          const m = links[j].href && links[j].href.match(/\/users\/(\d{17,20})/);
+          if (m) return m[1];
+        }
+      }
+      cur = parent;
+    }
+  }
+  try {
+    if (BdApi.ReactUtils && typeof BdApi.ReactUtils.getOwnerInstance === "function") {
+      let inst = BdApi.ReactUtils.getOwnerInstance(video);
+      for (let k = 0; k < 20 && inst; k++) {
+        const p = inst.props || {};
+        const id = p.userId || (p.user && p.user.id) || (p.participant && (p.participant.userId || (p.participant.user && p.participant.user.id)));
+        if (id) return String(id).trim();
+        const s = inst.state || {};
+        if (s.userId) return String(s.userId).trim();
+        const fiber = inst._reactInternalFiber || inst.return;
+        inst = fiber && fiber.return && fiber.return.stateNode;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 module.exports = class RaiseHand {
   constructor() {
+    this.originalGetUserMedia = null;
+    this.getUserMediaWrapper = null;
     this.observer = null;
     this.messageObserver = null;
     this.overlays = new Set();
     this.handVisible = false;
     this.queuePosition = null;
+    /** Map userId -> queue position for everyone in the channel (from bot's public POS message). Used to draw hand on other people's videos. */
+    this.remoteQueueByUserId = new Map();
+    /** When we can't get userId from DOM, we use muted to guess self; only attach to one such video so we don't draw on every muted tile. */
+    this.selfOverlayAttached = false;
   }
 
   setHandVisible(visible, position) {
@@ -137,6 +335,7 @@ module.exports = class RaiseHand {
       this.handVisible = false;
       this.queuePosition = null;
       this.removeAllOverlays();
+      this.scanVideos();
     }
   }
 
@@ -145,26 +344,90 @@ module.exports = class RaiseHand {
       if (el && el.parentNode) el.parentNode.removeChild(el);
     });
     this.overlays.clear();
+    this.selfOverlayAttached = false;
     document.querySelectorAll("[data-raisehand-attached]").forEach((el) => el.removeAttribute("data-raisehand-attached"));
   }
 
+  isLikelySelfVideo(video) {
+    if (!video) return false;
+    const uid = getUserIdForVideo(video);
+    const myId = getCurrentUserId();
+    if (uid != null && uid !== "") return uid === myId;
+    return video.muted === true;
+  }
+
+  /** True if we should treat this video as self and we haven't already attached to another "muted, no userId" self. */
+  canAttachSelfOverlay(video) {
+    if (!this.handVisible) return false;
+    const uid = getUserIdForVideo(video);
+    const myId = getCurrentUserId();
+    if (uid != null && uid !== "") return uid === myId;
+    if (!video.muted) return false;
+    return !this.selfOverlayAttached;
+  }
+
   tryAttachOverlayToVideo(video) {
-    if (!this.handVisible || !video || !video.parentElement || video.getAttribute("data-raisehand-attached") === "true") return;
+    if (!video || !video.parentElement || video.getAttribute("data-raisehand-attached") === "true") return;
     const parent = video.parentElement;
     if (parent.querySelector(".raisehand-overlay-wrap")) return;
+    const uid = getUserIdForVideo(video);
+    const myId = getCurrentUserId();
+    const isSelfById = uid != null && uid !== "" && uid === myId;
+    const noUid = uid == null || uid === "";
+    const isSelfMutedFallback = noUid && video.muted && this.canAttachSelfOverlay(video);
+    const isOnlyNoUidVideo = noUid && this._countNoUidVideos === 1;
+    let position = null;
+    if (isSelfById || isSelfMutedFallback || (isOnlyNoUidVideo && this.handVisible)) {
+      if (!this.handVisible) return;
+      position = this.queuePosition;
+      if (noUid && video.muted) this.selfOverlayAttached = true;
+    } else {
+      if (!uid || !this.remoteQueueByUserId.has(uid)) return;
+      position = this.remoteQueueByUserId.get(uid);
+    }
     const pos = getComputedStyle(parent).position;
     if (pos === "static") parent.style.position = "relative";
-    const overlay = createHandOverlayEl(this.queuePosition);
+    const overlay = createHandOverlayEl(position);
     parent.appendChild(overlay);
     video.setAttribute("data-raisehand-attached", "true");
     this.overlays.add(overlay);
   }
 
   scanVideos() {
-    if (!this.handVisible) return;
     const app = document.getElementById("app-mount");
     if (!app) return;
-    app.querySelectorAll("video").forEach((v) => this.tryAttachOverlayToVideo(v));
+    const shouldScan = this.handVisible || this.remoteQueueByUserId.size > 0;
+    if (!shouldScan) return;
+    const videos = Array.from(app.querySelectorAll("video"));
+    const myId = getCurrentUserId();
+    const countNoUid = videos.filter((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; }).length;
+    this._countNoUidVideos = countNoUid;
+    let keptOneSelfMuted = false;
+    videos.forEach((v) => {
+      const uid = getUserIdForVideo(v);
+      const noUid = uid == null || uid === "";
+      const isSelfById = !noUid && uid === myId;
+      const isSelfMutedFallback = noUid && v.muted;
+      const isOnlyNoUid = noUid && countNoUid === 1;
+      const isSelf = isSelfById || isSelfMutedFallback || isOnlyNoUid;
+      let shouldHaveOverlay = false;
+      if (isSelfById || isOnlyNoUid) shouldHaveOverlay = this.handVisible;
+      else if (isSelfMutedFallback) {
+        shouldHaveOverlay = this.handVisible && !keptOneSelfMuted;
+        if (shouldHaveOverlay) keptOneSelfMuted = true;
+      } else shouldHaveOverlay = !!(uid && this.remoteQueueByUserId.has(uid));
+      const hasOverlay = v.getAttribute("data-raisehand-attached") === "true";
+      if (hasOverlay && !shouldHaveOverlay) {
+        const wrap = v.parentElement && v.parentElement.querySelector(".raisehand-overlay-wrap");
+        if (wrap) {
+          wrap.remove();
+          v.removeAttribute("data-raisehand-attached");
+          this.overlays.delete(wrap);
+        }
+      }
+    });
+    this.selfOverlayAttached = keptOneSelfMuted;
+    videos.forEach((v) => this.tryAttachOverlayToVideo(v));
   }
 
   getFullMessageText(node) {
@@ -206,6 +469,8 @@ module.exports = class RaiseHand {
     if (hasPos) {
       const posMap = parsePosMarker(text);
       if (posMap !== null) {
+        this.remoteQueueByUserId = new Map(posMap);
+        this.scanVideos();
         if (posMap.size === 0) this.setHandVisible(false);
         else {
           const myId = getCurrentUserId();
@@ -239,6 +504,10 @@ module.exports = class RaiseHand {
     const app = document.getElementById("app-mount");
     if (app) this.messageObserver.observe(app, opts);
     if (document.body && document.body !== app) this.messageObserver.observe(document.body, opts);
+    setTimeout(() => {
+      if (app) scanTree(app);
+      if (document.body && document.body !== app) scanTree(document.body);
+    }, 1500);
   }
 
   start() {
@@ -249,6 +518,85 @@ module.exports = class RaiseHand {
       this.observer = new MutationObserver(() => this.scanVideos());
       this.observer.observe(app, { childList: true, subtree: true });
     }
+
+    const self = this;
+    const dm = navigator.mediaDevices;
+    if (!dm) return;
+    this.originalGetUserMedia = dm.getUserMedia.bind(dm);
+    this.getUserMediaWrapper = function (constraints) {
+      return self.originalGetUserMedia(constraints).then((stream) => {
+        if (!self.handVisible || !constraints || !constraints.video) return stream;
+        return compositeHandOntoVideoStream(stream, self.queuePosition);
+      });
+    };
+    try {
+      Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+        configurable: true,
+        enumerable: true,
+        get: function () { return self.getUserMediaWrapper; },
+        set: function () {}
+      });
+    } catch (_) {
+      navigator.mediaDevices.getUserMedia = this.getUserMediaWrapper;
+    }
+
+    this.installRTCPeerConnectionPatch();
+  }
+
+  installRTCPeerConnectionPatch() {
+    const self = this;
+    const PC = window.RTCPeerConnection;
+    if (!PC || this._rtcPatchInstalled) return;
+    this._rtcPatchInstalled = true;
+    this._originalAddTrack = PC.prototype.addTrack;
+    this._originalCreateOffer = PC.prototype.createOffer;
+    this._originalCreateAnswer = PC.prototype.createAnswer;
+
+    PC.prototype.addTrack = function (track, ...streams) {
+      if (track.kind !== "video" || !self.handVisible) {
+        return self._originalAddTrack.apply(this, [track, ...streams]);
+      }
+      const stream = streams[0] || new MediaStream([track]);
+      const sender = self._originalAddTrack.call(this, track, ...streams);
+      const pending = { sender, stream };
+      pending.promise = compositeHandOntoVideoStream(stream, self.queuePosition).then((compositeStream) => ({
+        track: compositeStream.getVideoTracks()[0]
+      }));
+      if (!this._raiseHandPending) this._raiseHandPending = [];
+      this._raiseHandPending.push(pending);
+      return sender;
+    };
+
+    const wrapCreate = function (original) {
+      return function (options) {
+        const pc = this;
+        const pending = pc._raiseHandPending;
+        if (!pending || pending.length === 0) return original.call(pc, options);
+        const list = pending.slice();
+        pc._raiseHandPending = [];
+        return Promise.all(list.map((p) => p.promise))
+          .then((results) => {
+            const replacePromises = results.map((r, i) => {
+              const p = list[i];
+              return r && r.track && p.sender && typeof p.sender.replaceTrack === "function"
+                ? p.sender.replaceTrack(r.track)
+                : Promise.resolve();
+            });
+            return Promise.all(replacePromises);
+          })
+          .then(() => original.call(pc, options));
+      };
+    };
+    PC.prototype.createOffer = wrapCreate(this._originalCreateOffer);
+    PC.prototype.createAnswer = wrapCreate(this._originalCreateAnswer);
+  }
+
+  uninstallRTCPeerConnectionPatch() {
+    if (!this._rtcPatchInstalled || !window.RTCPeerConnection) return;
+    this._rtcPatchInstalled = false;
+    if (this._originalAddTrack) window.RTCPeerConnection.prototype.addTrack = this._originalAddTrack;
+    if (this._originalCreateOffer) window.RTCPeerConnection.prototype.createOffer = this._originalCreateOffer;
+    if (this._originalCreateAnswer) window.RTCPeerConnection.prototype.createAnswer = this._originalCreateAnswer;
   }
 
   stop() {
@@ -263,5 +611,20 @@ module.exports = class RaiseHand {
     this.removeAllOverlays();
     BdApi.DOM.removeStyle(CSS_ID);
     clearUserModuleCache();
+    this.uninstallRTCPeerConnectionPatch();
+
+    if (this.originalGetUserMedia && navigator.mediaDevices) {
+      try {
+        Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+          configurable: true,
+          enumerable: true,
+          value: this.originalGetUserMedia
+        });
+      } catch (_) {
+        navigator.mediaDevices.getUserMedia = this.originalGetUserMedia;
+      }
+      this.originalGetUserMedia = null;
+      this.getUserMediaWrapper = null;
+    }
   }
 };

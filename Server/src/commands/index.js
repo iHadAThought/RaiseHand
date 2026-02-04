@@ -22,6 +22,33 @@ function formatQueueLine(index, member) {
   return `${displayPosition(index)}. ✋ ${member}`;
 }
 
+/** Channel ID -> state message ID (so everyone's plugin can see who has hand raised) */
+const stateMessageIds = new Map();
+
+/** Send or edit a public message in the channel with the current queue POS marker so all clients can overlay the hand on the right participants. */
+async function broadcastQueueState(interaction) {
+  const channel = interaction.channel;
+  if (!channel) return;
+  const channelId = interaction.channelId;
+  const userIds = queueManager.getOrderedUsers(channelId);
+  const content = markerPositions(userIds);
+
+  const messageId = stateMessageIds.get(channelId);
+  if (messageId) {
+    try {
+      const msg = await channel.messages.fetch(messageId);
+      await msg.edit(content);
+      return;
+    } catch (_) {
+      stateMessageIds.delete(channelId);
+    }
+  }
+  try {
+    const sent = await channel.send(content);
+    stateMessageIds.set(channelId, sent.id);
+  } catch (_) {}
+}
+
 export const commands = [
   new SlashCommandBuilder()
     .setName('raise')
@@ -68,6 +95,7 @@ export async function handleCommand(interaction) {
         flags: MessageFlags.Ephemeral,
       });
     }
+    await broadcastQueueState(interaction);
     return;
   }
 
@@ -84,6 +112,7 @@ export async function handleCommand(interaction) {
         flags: MessageFlags.Ephemeral,
       });
     }
+    if (removed) await broadcastQueueState(interaction);
     return;
   }
 
@@ -97,6 +126,7 @@ export async function handleCommand(interaction) {
       content: `✋ Hand raised. ${positionText} Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
       flags: MessageFlags.Ephemeral,
     });
+    await broadcastQueueState(interaction);
     return;
   }
 
@@ -141,6 +171,7 @@ export async function handleCommand(interaction) {
     await interaction.reply({
       content: `🎤 **Your turn, ${name}!** (removed from queue)${posMarker}`,
     });
+    await broadcastQueueState(interaction);
     return;
   }
 
@@ -149,6 +180,7 @@ export async function handleCommand(interaction) {
     await interaction.reply({
       content: '🧹 Speaking queue cleared.',
     });
+    await broadcastQueueState(interaction);
     return;
   }
 }

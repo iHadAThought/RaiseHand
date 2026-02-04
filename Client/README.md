@@ -4,9 +4,9 @@ User-side **BetterDiscord** plugin that shows a **hand symbol** on your video wh
 
 ## What it does
 
-- **/queue** (or **/raise**) in a channel where the bot is present → the hand appears on your video (overlay + stream), with your queue number.
+- When **you** type **/queue** or **/raise**, the hand appears on **your** video: you always see it on your self-view (overlay). Your queue number is shown in the blue badge.
 - **/lower** → the hand is hidden.
-- The plugin watches for the bot's ephemeral replies to toggle the hand; no extra setup.
+- **Others with the plugin** see the hand on your video too: the bot posts the queue state in the channel, and each participant's plugin draws the hand overlay on the correct person's video (e.g. Person B's plugin draws the hand over Person A's video on B's screen).
 
 ## Requirements
 
@@ -20,14 +20,13 @@ User-side **BetterDiscord** plugin that shows a **hand symbol** on your video wh
    - **Windows:** `%appdata%\BetterDiscord\plugins`
    - **Linux:** `~/.config/BetterDiscord/plugins`
 3. Open Discord → **Settings** → **Plugins**, enable **RaiseHand**.
-4. Join a voice channel and turn on your camera. You should see the hand on your own video preview (and, when the stream hook works, others will see it too).
+4. Join a voice channel and turn on your camera. You should see the hand on your own video preview when you use /queue or /raise.
 
 ## Usage
 
 1. Install the **RaiseHand bot** in your server (see **Server/README.md**) and invite it to your server.
 2. In any channel where the bot is present, type **/queue** to raise your hand — the hand (and your queue number) appears on your video. Type **/lower** to hide it.
-3. The hand is shown as an overlay on your preview and (when possible) composited into the stream others see.
-4. If the hand doesn't appear after /queue: turn video **off** then **on** again so the plugin can attach.
+3. The hand is shown as an overlay on your preview. **Everyone in the channel who has the plugin** will see the hand on your video (their plugin draws it from the bot's queue state). For others without the plugin, use a virtual camera (e.g. OBS) if you need them to see the hand.
 
 ## Uninstall
 
