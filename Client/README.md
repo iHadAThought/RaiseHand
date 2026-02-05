@@ -8,6 +8,18 @@ User-side **BetterDiscord** plugin that shows a **hand symbol** on your video wh
 - **/lower** → the hand is hidden.
 - **Others with the plugin** see the hand on your video too: the bot posts the queue state in the channel, and each participant's plugin draws the hand overlay on the correct person's video (e.g. Person B's plugin draws the hand over Person A's video on B's screen).
 
+### Who sees what (example)
+
+All have cameras on and the plugin installed. **A** types /raise (first), then **B** types /raise (second).
+
+| Viewer | On A's camera | On B's camera | On own self-view |
+|--------|----------------|---------------|------------------|
+| **A**  | —              | hand **2**    | hand **1**       |
+| **B**  | hand **1**     | —             | hand **2**      |
+| **C**  | hand **1**     | hand **2**    | —               |
+
+So: you always see **your** queue number on your self-view; on everyone else's video you see **their** queue number.
+
 ## Requirements
 
 - **BetterDiscord** installed: [betterdiscord.app](https://betterdiscord.app)

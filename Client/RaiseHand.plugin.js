@@ -310,6 +310,21 @@ function getUserIdForVideo(video) {
   return null;
 }
 
+/** Heuristic: does this video sit inside a container that looks like Discord's "your camera" / self preview? */
+function isInLikelySelfContainer(video) {
+  if (!video || !video.closest) return false;
+  let el = video;
+  for (let i = 0; i < 20 && el; i++) {
+    const c = (el.className && String(el.className)) || "";
+    const lower = c.toLowerCase();
+    if (/\b(self|preview|local|yours|own|participantPreview)\b/.test(lower)) return true;
+    const role = el.getAttribute && el.getAttribute("aria-label");
+    if (role && /you|yourself|self|preview|local/i.test(role)) return true;
+    el = el.parentElement;
+  }
+  return false;
+}
+
 module.exports = class RaiseHand {
   constructor() {
     this.originalGetUserMedia = null;
@@ -356,14 +371,14 @@ module.exports = class RaiseHand {
     return video.muted === true;
   }
 
-  /** True if we should treat this video as self and we haven't already attached to another "muted, no userId" self. */
+  /** True if we should treat this video as self and we haven't already attached to another no-uid self. */
   canAttachSelfOverlay(video) {
     if (!this.handVisible) return false;
     const uid = getUserIdForVideo(video);
     const myId = getCurrentUserId();
     if (uid != null && uid !== "") return uid === myId;
-    if (!video.muted) return false;
-    return !this.selfOverlayAttached;
+    const noUidSelf = video.muted || isInLikelySelfContainer(video) || video === this._firstNoUidVideo;
+    return noUidSelf && !this.selfOverlayAttached;
   }
 
   tryAttachOverlayToVideo(video) {
@@ -374,13 +389,14 @@ module.exports = class RaiseHand {
     const myId = getCurrentUserId();
     const isSelfById = uid != null && uid !== "" && uid === myId;
     const noUid = uid == null || uid === "";
-    const isSelfMutedFallback = noUid && video.muted && this.canAttachSelfOverlay(video);
+    const noUidSelfCandidate = noUid && (video.muted || isInLikelySelfContainer(video) || video === this._firstNoUidVideo);
+    const isSelfMutedFallback = noUidSelfCandidate && this.canAttachSelfOverlay(video);
     const isOnlyNoUidVideo = noUid && this._countNoUidVideos === 1;
     let position = null;
     if (isSelfById || isSelfMutedFallback || (isOnlyNoUidVideo && this.handVisible)) {
       if (!this.handVisible) return;
       position = this.queuePosition;
-      if (noUid && video.muted) this.selfOverlayAttached = true;
+      if (noUidSelfCandidate) this.selfOverlayAttached = true;
     } else {
       if (!uid || !this.remoteQueueByUserId.has(uid)) return;
       position = this.remoteQueueByUserId.get(uid);
@@ -402,19 +418,23 @@ module.exports = class RaiseHand {
     const myId = getCurrentUserId();
     const countNoUid = videos.filter((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; }).length;
     this._countNoUidVideos = countNoUid;
-    let keptOneSelfMuted = false;
+    this._firstNoUidVideo = countNoUid ? videos.find((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; }) : null;
+    let keptOneSelfNoUid = false;
+    const noUidVideos = videos.filter((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; });
     videos.forEach((v) => {
       const uid = getUserIdForVideo(v);
       const noUid = uid == null || uid === "";
       const isSelfById = !noUid && uid === myId;
-      const isSelfMutedFallback = noUid && v.muted;
+      const noUidSelfCandidate = noUid && (v.muted || isInLikelySelfContainer(v));
+      const isFirstNoUid = noUid && noUidVideos[0] === v;
       const isOnlyNoUid = noUid && countNoUid === 1;
-      const isSelf = isSelfById || isSelfMutedFallback || isOnlyNoUid;
+      const isSelfNoUidFallback = noUid && !keptOneSelfNoUid && (noUidSelfCandidate || (countNoUid >= 1 && isFirstNoUid));
+      const isSelf = isSelfById || isSelfNoUidFallback || isOnlyNoUid;
       let shouldHaveOverlay = false;
       if (isSelfById || isOnlyNoUid) shouldHaveOverlay = this.handVisible;
-      else if (isSelfMutedFallback) {
-        shouldHaveOverlay = this.handVisible && !keptOneSelfMuted;
-        if (shouldHaveOverlay) keptOneSelfMuted = true;
+      else if (isSelfNoUidFallback) {
+        shouldHaveOverlay = this.handVisible;
+        if (shouldHaveOverlay) keptOneSelfNoUid = true;
       } else shouldHaveOverlay = !!(uid && this.remoteQueueByUserId.has(uid));
       const hasOverlay = v.getAttribute("data-raisehand-attached") === "true";
       if (hasOverlay && !shouldHaveOverlay) {
@@ -426,22 +446,20 @@ module.exports = class RaiseHand {
         }
       }
     });
-    this.selfOverlayAttached = keptOneSelfMuted;
+    this.selfOverlayAttached = keptOneSelfNoUid;
     videos.forEach((v) => this.tryAttachOverlayToVideo(v));
   }
 
   getFullMessageText(node) {
-    const MAX_SINGLE_MSG = 550;
+    const MAX_LEN = 1000;
     let n = node;
-    let best = n.nodeType === Node.TEXT_NODE ? n.textContent : (n.textContent || "");
-    for (let i = 0; i < 6 && n; i++) {
-      const t = n.nodeType === Node.TEXT_NODE ? n.textContent : (n.textContent || "");
-      if (!t) { n = n.parentElement; continue; }
-      if (t.length > MAX_SINGLE_MSG) break;
-      if (t.includes("RaiseHand")) best = t;
+    for (let i = 0; i < 15 && n; i++) {
+      const t = (n.nodeType === Node.TEXT_NODE ? n.textContent : (n.textContent || "")) || "";
+      if (t.length > 10 && (t.includes(MARKER_POS_PREFIX) || t.includes(MARKER_SHOW_PREFIX) || t.includes(MARKER_LOWER)))
+        return t.length <= MAX_LEN ? t : t.slice(0, MAX_LEN);
       n = n.parentElement;
     }
-    return best;
+    return "";
   }
 
 
@@ -492,21 +510,31 @@ module.exports = class RaiseHand {
         node.childNodes.forEach(scanTree);
       }
     }
+    let messageScanTimer = null;
+    let pendingNodes = [];
+    const flushMessageScan = () => {
+      messageScanTimer = null;
+      const nodes = pendingNodes.slice();
+      pendingNodes = [];
+      nodes.forEach((node) => scanTree(node));
+    };
     const onMutations = (mutations) => {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
-          scanTree(node);
+          if (node && node.nodeType) pendingNodes.push(node);
         }
       }
+      if (pendingNodes.length === 0) return;
+      if (messageScanTimer) clearTimeout(messageScanTimer);
+      messageScanTimer = setTimeout(flushMessageScan, 200);
     };
     this.messageObserver = new MutationObserver(onMutations);
-    const opts = { childList: true, subtree: true, characterData: true, characterDataOldValue: false };
+    const opts = { childList: true, subtree: true };
     const app = document.getElementById("app-mount");
     if (app) this.messageObserver.observe(app, opts);
     if (document.body && document.body !== app) this.messageObserver.observe(document.body, opts);
     setTimeout(() => {
       if (app) scanTree(app);
-      if (document.body && document.body !== app) scanTree(document.body);
     }, 1500);
   }
 
@@ -515,7 +543,14 @@ module.exports = class RaiseHand {
     this.observeMessages();
     const app = document.getElementById("app-mount");
     if (app) {
-      this.observer = new MutationObserver(() => this.scanVideos());
+      let videoScanTimer = null;
+      this.observer = new MutationObserver(() => {
+        if (videoScanTimer) clearTimeout(videoScanTimer);
+        videoScanTimer = setTimeout(() => {
+          videoScanTimer = null;
+          this.scanVideos();
+        }, 120);
+      });
       this.observer.observe(app, { childList: true, subtree: true });
     }
 

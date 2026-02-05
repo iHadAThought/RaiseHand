@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, MessageFlags } from 'discord.js';
+import { SlashCommandBuilder, MessageFlags, ChannelType } from 'discord.js';
 import { queueManager } from '../queueManager.js';
 
 const MAX_POSITION = 99;
@@ -22,30 +22,68 @@ function formatQueueLine(index, member) {
   return `${displayPosition(index)}. ✋ ${member}`;
 }
 
-/** Channel ID -> state message ID (so everyone's plugin can see who has hand raised) */
-const stateMessageIds = new Map();
+/** Command channel ID -> { messageId, channelId } (channelId = where we actually sent, so we can edit) */
+const stateMessageByChannel = new Map();
 
-/** Send or edit a public message in the channel with the current queue POS marker so all clients can overlay the hand on the right participants. */
-async function broadcastQueueState(interaction) {
+/** Build human-readable queue line for the notification. */
+function formatQueueNotify(members, displayPos) {
+  return members
+    .filter(Boolean)
+    .map((m, i) => `**${m.displayName}** (${displayPos(i + 1)})`)
+    .join(', ');
+}
+
+/** Text channel to post to: use command channel if it's text-based, else first viewable text channel in the guild. */
+function getTextChannelForBroadcast(interaction) {
   const channel = interaction.channel;
-  if (!channel) return;
+  if (!channel || !interaction.guild) return null;
+  if (channel.isTextBased && channel.isTextBased()) return channel;
+  if (channel.type === ChannelType.GuildVoice) {
+    const text = interaction.guild.channels.cache.find(
+      (c) => (c.isTextBased && c.isTextBased()) && c.viewable
+    );
+    return text || null;
+  }
+  return channel;
+}
+
+/** Send or edit a public message: notifies everyone who has their hand raised, and appends the POS marker so all plugins can draw the hand on the raiser's video. */
+async function broadcastQueueState(interaction) {
+  const targetChannel = getTextChannelForBroadcast(interaction);
+  if (!targetChannel) return;
   const channelId = interaction.channelId;
   const userIds = queueManager.getOrderedUsers(channelId);
-  const content = markerPositions(userIds);
+  const posMarker = markerPositions(userIds);
 
-  const messageId = stateMessageIds.get(channelId);
-  if (messageId) {
+  let humanText;
+  if (userIds.length === 0) {
+    humanText = '✋ No one has their hand raised.';
+  } else {
+    const members = await Promise.all(
+      userIds.map((id) => interaction.guild.members.fetch(id).catch(() => null))
+    );
+    const names = formatQueueNotify(members, displayPosition);
+    humanText = userIds.length === 1
+      ? `✋ ${names} raised their hand.`
+      : `✋ ${names} have their hand raised.`;
+  }
+  const content = `${humanText}${posMarker}`;
+
+  const data = stateMessageByChannel.get(channelId);
+  if (data) {
     try {
-      const msg = await channel.messages.fetch(messageId);
-      await msg.edit(content);
-      return;
-    } catch (_) {
-      stateMessageIds.delete(channelId);
-    }
+      const ch = data.channelId ? interaction.guild.channels.cache.get(data.channelId) : targetChannel;
+      const msg = ch ? await ch.messages.fetch(data.messageId) : null;
+      if (msg) {
+        await msg.edit(content);
+        return;
+      }
+    } catch (_) {}
+    stateMessageByChannel.delete(channelId);
   }
   try {
-    const sent = await channel.send(content);
-    stateMessageIds.set(channelId, sent.id);
+    const sent = await targetChannel.send(content);
+    stateMessageByChannel.set(channelId, { messageId: sent.id, channelId: targetChannel.id });
   } catch (_) {}
 }
 
