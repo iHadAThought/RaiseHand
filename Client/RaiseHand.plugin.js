@@ -247,17 +247,39 @@ function createHandOverlayEl(queuePosition) {
   return wrap;
 }
 
-/** Walk up from a video element to find the participant's user id (for remote videos so everyone's plugin can draw the hand). */
+/** Extract Discord user id (snowflake) from props or state object; returns null if none. */
+function userIdFromPropsOrState(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const id = obj.userId || (obj.user && obj.user.id) || (obj.participant && (obj.participant.userId || (obj.participant.user && obj.participant.user.id)));
+  if (id != null && id !== "" && /^\d{17,20}$/.test(String(id))) return String(id).trim();
+  return null;
+}
+
+/** Consistent comparison for overlay placement: same user id (handles string/number and null/empty). */
+function sameUserId(a, b) {
+  if (a == null || a === "" || b == null || b === "") return false;
+  return String(a).trim() === String(b).trim();
+}
+
+/**
+ * Best methods to track which video view belongs to which user (Discord/BetterDiscord):
+ * 1. DOM data attributes (most stable): data-user-id, data-list-item-id (member-{id}), data-member-id, or element id as snowflake.
+ * 2. Links: closest a[href*='/users/'] or sibling/parent links with /users/{id}.
+ * 3. BdApi.ReactUtils.getOwnerInstance(node) with filter: stop at first component with userId/participant in props.
+ * 4. React Fiber: from DOM node (or parent chain), get fiber via __reactFiber* / __reactInternals*; walk fiber.return and read memoizedProps.
+ */
 function getUserIdForVideo(video) {
   if (!video || !video.parentElement) return null;
+  const normalized = (v) => (v != null && v !== "" ? String(v).trim() : null);
+
   let el = video;
   for (let i = 0; i < 25 && el; i++) {
     const uid = el.getAttribute && el.getAttribute("data-user-id");
-    if (uid) return uid.trim();
+    if (uid) return normalized(uid);
     const listId = el.getAttribute && el.getAttribute("data-list-item-id");
-    if (listId && listId.startsWith("member-")) return listId.replace(/^member\-/, "").trim();
+    if (listId && listId.startsWith("member-")) return normalized(listId.replace(/^member\-/, ""));
     const memberId = el.getAttribute && el.getAttribute("data-member-id");
-    if (memberId) return memberId.trim();
+    if (memberId) return normalized(memberId);
     const idAttr = el.getAttribute && el.getAttribute("id");
     if (idAttr && /^\d{17,20}$/.test(idAttr)) return idAttr;
     el = el.parentElement;
@@ -265,9 +287,9 @@ function getUserIdForVideo(video) {
   const container = video.closest && video.closest("[data-list-item-id], [data-user-id], [id]");
   if (container) {
     const u = container.getAttribute("data-user-id") || container.getAttribute("data-member-id");
-    if (u) return u.trim();
+    if (u) return normalized(u);
     const lid = container.getAttribute("data-list-item-id");
-    if (lid && lid.startsWith("member-")) return lid.replace(/^member\-/, "").trim();
+    if (lid && lid.startsWith("member-")) return normalized(lid.replace(/^member\-/, ""));
     const id = container.getAttribute("id");
     if (id && /^\d{17,20}$/.test(id)) return id;
   }
@@ -278,7 +300,6 @@ function getUserIdForVideo(video) {
   }
   const root = video.closest && video.closest("#app-mount");
   if (root) {
-    const subtree = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
     let cur = video;
     while (cur && cur !== root) {
       const parent = cur.parentElement;
@@ -294,19 +315,47 @@ function getUserIdForVideo(video) {
     }
   }
   try {
-    if (BdApi.ReactUtils && typeof BdApi.ReactUtils.getOwnerInstance === "function") {
-      let inst = BdApi.ReactUtils.getOwnerInstance(video);
-      for (let k = 0; k < 20 && inst; k++) {
-        const p = inst.props || {};
-        const id = p.userId || (p.user && p.user.id) || (p.participant && (p.participant.userId || (p.participant.user && p.participant.user.id)));
-        if (id) return String(id).trim();
-        const s = inst.state || {};
-        if (s.userId) return String(s.userId).trim();
-        const fiber = inst._reactInternalFiber || inst.return;
-        inst = fiber && fiber.return && fiber.return.stateNode;
+    if (typeof BdApi !== "undefined" && BdApi.ReactUtils && typeof BdApi.ReactUtils.getOwnerInstance === "function") {
+      const inst = BdApi.ReactUtils.getOwnerInstance(video, {
+        exclude: ["Popout", "Tooltip", "Scroller", "BackgroundFlash"],
+        filter: (owner) => userIdFromPropsOrState(owner?.props) != null || userIdFromPropsOrState(owner?.state) != null
+      });
+      let cur = inst;
+      for (let k = 0; k < 25 && cur; k++) {
+        const id = userIdFromPropsOrState(cur.props) || userIdFromPropsOrState(cur.state);
+        if (id) return id;
+        const fiber = cur._reactInternalFiber || cur.return;
+        cur = fiber && fiber.return && fiber.return.stateNode;
       }
     }
   } catch (_) {}
+  try {
+    let node = video;
+    for (let up = 0; up < 5 && node; up++) {
+      const idFromFiber = getUserIdFromReactFiber(node);
+      if (idFromFiber) return idFromFiber;
+      node = node.parentElement;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/** Walk React Fiber tree from DOM node and read memoizedProps for userId/participant (works when owner is a function component). */
+function getUserIdFromReactFiber(node) {
+  if (!node || typeof node !== "object") return null;
+  let fiber = null;
+  for (const key of Object.keys(node)) {
+    if ((key.startsWith("__reactFiber") || key.startsWith("__reactInternals")) && node[key]) {
+      fiber = node[key];
+      break;
+    }
+  }
+  if (!fiber) return null;
+  for (let i = 0; i < 35 && fiber; i++) {
+    const id = userIdFromPropsOrState(fiber.memoizedProps);
+    if (id) return id;
+    fiber = fiber.return;
+  }
   return null;
 }
 
@@ -338,6 +387,8 @@ module.exports = class RaiseHand {
     this.remoteQueueByUserId = new Map();
     /** When we can't get userId from DOM, we use muted to guess self; only attach to one such video so we don't draw on every muted tile. */
     this.selfOverlayAttached = false;
+    /** Video element we attached the self overlay to, so we don't remove it on rescan when DOM order changes. */
+    this._selfVideoElement = null;
   }
 
   setHandVisible(visible, position) {
@@ -360,6 +411,7 @@ module.exports = class RaiseHand {
     });
     this.overlays.clear();
     this.selfOverlayAttached = false;
+    this._selfVideoElement = null;
     document.querySelectorAll("[data-raisehand-attached]").forEach((el) => el.removeAttribute("data-raisehand-attached"));
   }
 
@@ -367,7 +419,7 @@ module.exports = class RaiseHand {
     if (!video) return false;
     const uid = getUserIdForVideo(video);
     const myId = getCurrentUserId();
-    if (uid != null && uid !== "") return uid === myId;
+    if (uid != null && uid !== "") return sameUserId(uid, myId);
     return video.muted === true;
   }
 
@@ -376,18 +428,18 @@ module.exports = class RaiseHand {
     if (!this.handVisible) return false;
     const uid = getUserIdForVideo(video);
     const myId = getCurrentUserId();
-    if (uid != null && uid !== "") return uid === myId;
+    if (uid != null && uid !== "") return sameUserId(uid, myId);
     const noUidSelf = video.muted || isInLikelySelfContainer(video) || video === this._firstNoUidVideo;
     return noUidSelf && !this.selfOverlayAttached;
   }
 
-  tryAttachOverlayToVideo(video) {
+  tryAttachOverlayToVideo(video, cachedUid) {
     if (!video || !video.parentElement || video.getAttribute("data-raisehand-attached") === "true") return;
     const parent = video.parentElement;
     if (parent.querySelector(".raisehand-overlay-wrap")) return;
-    const uid = getUserIdForVideo(video);
+    const uid = cachedUid !== undefined ? cachedUid : getUserIdForVideo(video);
     const myId = getCurrentUserId();
-    const isSelfById = uid != null && uid !== "" && uid === myId;
+    const isSelfById = uid != null && uid !== "" && sameUserId(uid, myId);
     const noUid = uid == null || uid === "";
     const noUidSelfCandidate = noUid && (video.muted || isInLikelySelfContainer(video) || video === this._firstNoUidVideo);
     const isSelfMutedFallback = noUidSelfCandidate && this.canAttachSelfOverlay(video);
@@ -397,6 +449,7 @@ module.exports = class RaiseHand {
       if (!this.handVisible) return;
       position = this.queuePosition;
       if (noUidSelfCandidate) this.selfOverlayAttached = true;
+      this._selfVideoElement = video;
     } else {
       if (!uid || !this.remoteQueueByUserId.has(uid)) return;
       position = this.remoteQueueByUserId.get(uid);
@@ -410,34 +463,43 @@ module.exports = class RaiseHand {
   }
 
   scanVideos() {
-    const app = document.getElementById("app-mount");
-    if (!app) return;
     const shouldScan = this.handVisible || this.remoteQueueByUserId.size > 0;
     if (!shouldScan) return;
-    const videos = Array.from(app.querySelectorAll("video"));
+    const videos = Array.from(document.querySelectorAll("video"));
+    if (videos.length === 0) return;
+    if (this._selfVideoElement && !document.contains(this._selfVideoElement)) this._selfVideoElement = null;
     const myId = getCurrentUserId();
-    const countNoUid = videos.filter((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; }).length;
+    const uidCache = new Map();
+    const getUid = (v) => {
+      if (!uidCache.has(v)) uidCache.set(v, getUserIdForVideo(v));
+      return uidCache.get(v);
+    };
+    const noUidVideos = videos.filter((v) => { const u = getUid(v); return u == null || u === ""; });
+    const countNoUid = noUidVideos.length;
     this._countNoUidVideos = countNoUid;
-    this._firstNoUidVideo = countNoUid ? videos.find((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; }) : null;
+    this._firstNoUidVideo = countNoUid ? noUidVideos[0] : null;
     let keptOneSelfNoUid = false;
-    const noUidVideos = videos.filter((v) => { const u = getUserIdForVideo(v); return u == null || u === ""; });
     videos.forEach((v) => {
-      const uid = getUserIdForVideo(v);
+      const uid = getUid(v);
       const noUid = uid == null || uid === "";
-      const isSelfById = !noUid && uid === myId;
-      const noUidSelfCandidate = noUid && (v.muted || isInLikelySelfContainer(v));
+      const isSelfById = !noUid && sameUserId(uid, myId);
+      const noUidSelfCandidate = noUid && (v.muted === true || isInLikelySelfContainer(v));
       const isFirstNoUid = noUid && noUidVideos[0] === v;
       const isOnlyNoUid = noUid && countNoUid === 1;
       const isSelfNoUidFallback = noUid && !keptOneSelfNoUid && (noUidSelfCandidate || (countNoUid >= 1 && isFirstNoUid));
       const isSelf = isSelfById || isSelfNoUidFallback || isOnlyNoUid;
       let shouldHaveOverlay = false;
-      if (isSelfById || isOnlyNoUid) shouldHaveOverlay = this.handVisible;
+      if (v === this._selfVideoElement && this.handVisible) {
+        shouldHaveOverlay = true;
+        keptOneSelfNoUid = true;
+      } else if (isSelfById || isOnlyNoUid) shouldHaveOverlay = this.handVisible;
       else if (isSelfNoUidFallback) {
         shouldHaveOverlay = this.handVisible;
         if (shouldHaveOverlay) keptOneSelfNoUid = true;
       } else shouldHaveOverlay = !!(uid && this.remoteQueueByUserId.has(uid));
       const hasOverlay = v.getAttribute("data-raisehand-attached") === "true";
       if (hasOverlay && !shouldHaveOverlay) {
+        if (v === this._selfVideoElement) this._selfVideoElement = null;
         const wrap = v.parentElement && v.parentElement.querySelector(".raisehand-overlay-wrap");
         if (wrap) {
           wrap.remove();
@@ -447,7 +509,7 @@ module.exports = class RaiseHand {
       }
     });
     this.selfOverlayAttached = keptOneSelfNoUid;
-    videos.forEach((v) => this.tryAttachOverlayToVideo(v));
+    videos.forEach((v) => this.tryAttachOverlayToVideo(v, getUid(v)));
   }
 
   getFullMessageText(node) {
@@ -493,7 +555,8 @@ module.exports = class RaiseHand {
         else {
           const myId = getCurrentUserId();
           if (myId) {
-            if (posMap.has(myId)) this.setHandVisible(true, posMap.get(myId));
+            const myIdNorm = String(myId).trim();
+            if (posMap.has(myIdNorm)) this.setHandVisible(true, posMap.get(myIdNorm));
             else this.setHandVisible(false);
           }
         }
