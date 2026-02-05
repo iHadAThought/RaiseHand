@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, MessageFlags, ChannelType } from 'discord.js';
+import { SlashCommandBuilder, ChannelType } from 'discord.js';
 import { queueManager } from '../queueManager.js';
 
 const MAX_POSITION = 99;
@@ -6,7 +6,7 @@ function displayPosition(position) {
   return Math.min(position, MAX_POSITION);
 }
 
-/** Magic suffix for RaiseHand plugin — plugin looks for these in ephemeral reply text. Include position for overlay (capped at 99). */
+/** Magic suffix for RaiseHand plugin — plugin looks for these in reply text. Include position for overlay (capped at 99). */
 function markerShow(position) {
   return `\u200BRaiseHand:SHOW:${displayPosition(position)}`;
 }
@@ -25,6 +25,53 @@ function formatQueueLine(index, member) {
 /** Command channel ID -> { messageId, channelId } (channelId = where we actually sent, so we can edit) */
 const stateMessageByChannel = new Map();
 
+/** Command channel ID -> Array<{ channelId, messageId }> of recent bot replies to delete when /clear is run */
+const recentBotRepliesByChannel = new Map();
+
+/** Delete the state message for this queue channel and remove from map. */
+async function deleteStateMessageForChannel(guild, commandChannelId) {
+  const data = stateMessageByChannel.get(commandChannelId);
+  if (!data) return;
+  try {
+    const ch = data.channelId ? guild.channels.cache.get(data.channelId) : null;
+    if (ch) {
+      const msg = await ch.messages.fetch(data.messageId).catch(() => null);
+      if (msg) await msg.delete().catch(() => {});
+    }
+  } catch (_) {}
+  stateMessageByChannel.delete(commandChannelId);
+}
+
+/** Track a reply message so it can be deleted when /clear is run. Call after interaction.reply(). */
+async function trackReplyForClear(interaction) {
+  try {
+    const msg = await interaction.fetchReply();
+    if (msg?.id && msg.channel?.id) {
+      const key = interaction.channelId;
+      if (!recentBotRepliesByChannel.has(key)) recentBotRepliesByChannel.set(key, []);
+      recentBotRepliesByChannel.get(key).push({ channelId: msg.channel.id, messageId: msg.id });
+    }
+  } catch (_) {}
+}
+
+/** Delete all tracked bot messages for this queue channel (state message + recent replies). */
+async function deleteAllBotMessagesForChannel(guild, commandChannelId) {
+  await deleteStateMessageForChannel(guild, commandChannelId);
+  const replies = recentBotRepliesByChannel.get(commandChannelId);
+  if (replies?.length) {
+    for (const { channelId, messageId } of replies) {
+      try {
+        const ch = guild.channels.cache.get(channelId);
+        if (ch) {
+          const msg = await ch.messages.fetch(messageId).catch(() => null);
+          if (msg) await msg.delete().catch(() => {});
+        }
+      } catch (_) {}
+    }
+    recentBotRepliesByChannel.delete(commandChannelId);
+  }
+}
+
 /** Build human-readable queue line for the notification. */
 function formatQueueNotify(members, displayPos) {
   return members
@@ -33,16 +80,22 @@ function formatQueueNotify(members, displayPos) {
     .join(', ');
 }
 
-/** Text channel to post to: use command channel if it's text-based, else first viewable text channel in the guild. */
+/** Text channel to post to: use command channel if text-based; from voice, prefer a text channel in the same category so participants are likely to see it. */
 function getTextChannelForBroadcast(interaction) {
   const channel = interaction.channel;
   if (!channel || !interaction.guild) return null;
   if (channel.isTextBased && channel.isTextBased()) return channel;
   if (channel.type === ChannelType.GuildVoice) {
-    const text = interaction.guild.channels.cache.find(
-      (c) => (c.isTextBased && c.isTextBased()) && c.viewable
-    );
-    return text || null;
+    const parentId = channel.parentId || (channel.parent && channel.parent.id);
+    const viewableText = (c) => (c.isTextBased && c.isTextBased()) && c.viewable;
+    if (parentId) {
+      const inCategory = interaction.guild.channels.cache.find(
+        (c) => viewableText(c) && (c.parentId === parentId || (c.parent && c.parent.id === parentId))
+      );
+      if (inCategory) return inCategory;
+    }
+    const anyText = interaction.guild.channels.cache.find(viewableText);
+    return anyText || null;
   }
   return channel;
 }
@@ -114,25 +167,31 @@ export const commands = [
     .toJSON(),
 ];
 
+function getAuthorDisplayName(interaction) {
+  const member = interaction.member;
+  if (member && (member.displayName ?? member.user?.username)) return member.displayName ?? member.user?.username;
+  return interaction.user?.globalName ?? interaction.user?.username ?? 'Someone';
+}
+
 export async function handleCommand(interaction) {
   const { commandName } = interaction;
   const channelId = interaction.channelId;
   const userId = interaction.user.id;
+  const authorName = getAuthorDisplayName(interaction);
 
   if (commandName === 'raise') {
     const { added, position } = queueManager.raiseHand(channelId, userId);
     const visiblePos = displayPosition(position);
     if (added) {
       await interaction.reply({
-        content: `✋ You're in the speaking queue (position **${visiblePos}**). Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
-        flags: MessageFlags.Ephemeral,
+        content: `✋ **${authorName}** is in the speaking queue (position **${visiblePos}**). Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
       });
     } else {
       await interaction.reply({
-        content: `You're already in the queue at position **${visiblePos}**. Use \`/lower\` if you want to remove yourself.${markerShow(visiblePos)}`,
-        flags: MessageFlags.Ephemeral,
+        content: `**${authorName}** is already in the queue at position **${visiblePos}**. Use \`/lower\` to remove yourself.${markerShow(visiblePos)}`,
       });
     }
+    await trackReplyForClear(interaction);
     await broadcastQueueState(interaction);
     return;
   }
@@ -141,16 +200,19 @@ export async function handleCommand(interaction) {
     const removed = queueManager.lowerHand(channelId, userId);
     if (removed) {
       await interaction.reply({
-        content: `👍 Hand lowered. You've been removed from the speaking queue.${MARKER_LOWER}`,
-        flags: MessageFlags.Ephemeral,
+        content: `👍 **${authorName}** lowered their hand and was removed from the speaking queue.${MARKER_LOWER}`,
       });
     } else {
       await interaction.reply({
-        content: "You're not in the speaking queue.",
-        flags: MessageFlags.Ephemeral,
+        content: `**${authorName}** is not in the speaking queue.`,
       });
     }
-    if (removed) await broadcastQueueState(interaction);
+    await trackReplyForClear(interaction);
+    if (removed) {
+      const remaining = queueManager.getOrderedUsers(channelId);
+      if (remaining.length === 0) await deleteAllBotMessagesForChannel(interaction.guild, channelId);
+      else await broadcastQueueState(interaction);
+    }
     return;
   }
 
@@ -158,12 +220,12 @@ export async function handleCommand(interaction) {
     const { added, position } = queueManager.raiseHand(channelId, userId);
     const visiblePos = displayPosition(position);
     const positionText = added
-      ? `You're in the speaking queue (position **${visiblePos}**).`
-      : `You're already in the queue at position **${visiblePos}**.`;
+      ? `**${authorName}** is in the speaking queue (position **${visiblePos}**).`
+      : `**${authorName}** is already in the queue at position **${visiblePos}**.`;
     await interaction.reply({
       content: `✋ Hand raised. ${positionText} Use \`/queuelist\` to see the order.${markerShow(visiblePos)}`,
-      flags: MessageFlags.Ephemeral,
     });
+    await trackReplyForClear(interaction);
     await broadcastQueueState(interaction);
     return;
   }
@@ -174,6 +236,7 @@ export async function handleCommand(interaction) {
       await interaction.reply({
         content: '📭 **Speaking Queue** — No hands raised. Use `/queue` to add yourself!',
       });
+      await trackReplyForClear(interaction);
       return;
     }
 
@@ -190,6 +253,7 @@ export async function handleCommand(interaction) {
     await interaction.reply({
       content: `📋 **Speaking Queue** (use \`/next\` to call on someone)\n\n${text}`,
     });
+    await trackReplyForClear(interaction);
     return;
   }
 
@@ -199,6 +263,7 @@ export async function handleCommand(interaction) {
       await interaction.reply({
         content: '📭 The queue is empty. No one has their hand raised.',
       });
+      await trackReplyForClear(interaction);
       return;
     }
 
@@ -209,7 +274,9 @@ export async function handleCommand(interaction) {
     await interaction.reply({
       content: `🎤 **Your turn, ${name}!** (removed from queue)${posMarker}`,
     });
-    await broadcastQueueState(interaction);
+    await trackReplyForClear(interaction);
+    if (remainingIds.length === 0) await deleteAllBotMessagesForChannel(interaction.guild, channelId);
+    else await broadcastQueueState(interaction);
     return;
   }
 
@@ -218,7 +285,7 @@ export async function handleCommand(interaction) {
     await interaction.reply({
       content: '🧹 Speaking queue cleared.',
     });
-    await broadcastQueueState(interaction);
+    await deleteAllBotMessagesForChannel(interaction.guild, channelId);
     return;
   }
 }

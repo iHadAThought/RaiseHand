@@ -374,6 +374,27 @@ function isInLikelySelfContainer(video) {
   return false;
 }
 
+/** Get the message author's user id from a node inside a Discord message (for slash command replies). */
+function getMessageAuthorId(node) {
+  if (!node) return null;
+  let el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  for (let i = 0; i < 25 && el; i++) {
+    const uid = el.getAttribute && el.getAttribute("data-author-id");
+    if (uid && /^\d{17,20}$/.test(String(uid).trim())) return String(uid).trim();
+    const u = el.getAttribute && el.getAttribute("data-user-id");
+    if (u && /^\d{17,20}$/.test(String(u).trim())) return String(u).trim();
+    if (el.querySelector) {
+      const link = el.querySelector("a[href*='/users/']");
+      if (link && link.href) {
+        const m = link.href.match(/\/users\/(\d{17,20})/);
+        if (m) return m[1];
+      }
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
 module.exports = class RaiseHand {
   constructor() {
     this.originalGetUserMedia = null;
@@ -396,12 +417,12 @@ module.exports = class RaiseHand {
       this.queuePosition = position != null ? position : this.queuePosition;
       if (this.handVisible) this.removeAllOverlays();
       this.handVisible = true;
-      this.scanVideos();
+      this.scheduleScanVideos();
     } else {
       this.handVisible = false;
       this.queuePosition = null;
       this.removeAllOverlays();
-      this.scanVideos();
+      this.scheduleScanVideos();
     }
   }
 
@@ -434,9 +455,8 @@ module.exports = class RaiseHand {
   }
 
   tryAttachOverlayToVideo(video, cachedUid) {
-    if (!video || !video.parentElement || video.getAttribute("data-raisehand-attached") === "true") return;
+    if (!video || !video.parentElement) return;
     const parent = video.parentElement;
-    if (parent.querySelector(".raisehand-overlay-wrap")) return;
     const uid = cachedUid !== undefined ? cachedUid : getUserIdForVideo(video);
     const myId = getCurrentUserId();
     const isSelfById = uid != null && uid !== "" && sameUserId(uid, myId);
@@ -444,6 +464,15 @@ module.exports = class RaiseHand {
     const noUidSelfCandidate = noUid && (video.muted || isInLikelySelfContainer(video) || video === this._firstNoUidVideo);
     const isSelfMutedFallback = noUidSelfCandidate && this.canAttachSelfOverlay(video);
     const isOnlyNoUidVideo = noUid && this._countNoUidVideos === 1;
+    const isSelfTile = isSelfById || isSelfMutedFallback || (isOnlyNoUidVideo && this.handVisible);
+    const existingWrap = parent.querySelector(".raisehand-overlay-wrap");
+    if (existingWrap && !isSelfTile) return;
+    if (existingWrap && isSelfTile) {
+      existingWrap.remove();
+      video.removeAttribute("data-raisehand-attached");
+      this.overlays.delete(existingWrap);
+    }
+    if (video.getAttribute("data-raisehand-attached") === "true" && !isSelfTile) return;
     let position = null;
     if (isSelfById || isSelfMutedFallback || (isOnlyNoUidVideo && this.handVisible)) {
       if (!this.handVisible) return;
@@ -452,6 +481,8 @@ module.exports = class RaiseHand {
       this._selfVideoElement = video;
     } else {
       if (!uid || !this.remoteQueueByUserId.has(uid)) return;
+      if (video === this._selfVideoElement) return;
+      if (noUid && (video.muted || isInLikelySelfContainer(video))) return;
       position = this.remoteQueueByUserId.get(uid);
     }
     const pos = getComputedStyle(parent).position;
@@ -462,12 +493,26 @@ module.exports = class RaiseHand {
     this.overlays.add(overlay);
   }
 
+  scheduleScanVideos() {
+    if (this._scanVideosTimer) clearTimeout(this._scanVideosTimer);
+    this._scanVideosTimer = setTimeout(() => {
+      this._scanVideosTimer = null;
+      this.scanVideos();
+    }, 220);
+  }
+
   scanVideos() {
     const shouldScan = this.handVisible || this.remoteQueueByUserId.size > 0;
     if (!shouldScan) return;
     const videos = Array.from(document.querySelectorAll("video"));
     if (videos.length === 0) return;
     if (this._selfVideoElement && !document.contains(this._selfVideoElement)) this._selfVideoElement = null;
+    videos.forEach((v) => {
+      if (v.getAttribute("data-raisehand-attached") === "true") {
+        const wrap = v.parentElement && v.parentElement.querySelector(".raisehand-overlay-wrap");
+        if (!wrap) v.removeAttribute("data-raisehand-attached");
+      }
+    });
     const myId = getCurrentUserId();
     const uidCache = new Map();
     const getUid = (v) => {
@@ -499,6 +544,8 @@ module.exports = class RaiseHand {
       } else shouldHaveOverlay = !!(uid && this.remoteQueueByUserId.has(uid));
       const hasOverlay = v.getAttribute("data-raisehand-attached") === "true";
       if (hasOverlay && !shouldHaveOverlay) {
+        const isRemoteWithUnknownUid = !(v === this._selfVideoElement) && (uid == null || uid === "");
+        if (isRemoteWithUnknownUid) return;
         if (v === this._selfVideoElement) this._selfVideoElement = null;
         const wrap = v.parentElement && v.parentElement.querySelector(".raisehand-overlay-wrap");
         if (wrap) {
@@ -524,6 +571,13 @@ module.exports = class RaiseHand {
     return "";
   }
 
+  /** Only apply SHOW to our own state when this message was sent by the current user (so we don't apply someone else's SHOW:2 to ourselves). */
+  isMessageFromCurrentUser(node) {
+    const myId = getCurrentUserId();
+    if (!myId) return false;
+    const authorId = getMessageAuthorId(node);
+    return authorId != null && sameUserId(authorId, myId);
+  }
 
   checkNodeForMarkers(node) {
     const text = this.getFullMessageText(node);
@@ -534,25 +588,45 @@ module.exports = class RaiseHand {
     if (hasShow && hasLower && text.length > 200) {
       const lastShow = text.lastIndexOf(MARKER_SHOW_PREFIX);
       const lastLower = text.lastIndexOf(MARKER_LOWER);
-      if (lastShow > lastLower) {
-        const position = parseShowMarker(text);
-        this.setHandVisible(true, position);
-      } else this.setHandVisible(false);
+      if (lastShow > lastLower && this.isMessageFromCurrentUser(node)) {
+        const myId = getCurrentUserId();
+        if (myId && this.remoteQueueByUserId.has(String(myId).trim())) {
+          const position = parseShowMarker(text);
+          this.setHandVisible(true, position);
+        }
+      } else if (lastLower > lastShow) this.setHandVisible(false);
       return;
     }
-    if (hasShow) {
-      const position = parseShowMarker(text);
-      this.setHandVisible(true, position);
+    if (hasShow && this.isMessageFromCurrentUser(node)) {
+      const myId = getCurrentUserId();
+      if (myId && this.remoteQueueByUserId.has(String(myId).trim())) {
+        const position = parseShowMarker(text);
+        this.setHandVisible(true, position);
+      }
     }
-    if (hasLower) this.setHandVisible(false);
-    if (this.handVisible && text.length < 300 && (text.includes("You've been removed from the speaking queue") || text.includes("Hand lowered"))) this.setHandVisible(false);
+    if (hasLower && this.isMessageFromCurrentUser(node)) this.setHandVisible(false);
+    if (this.handVisible && text.length < 300 && this.isMessageFromCurrentUser(node) && (text.includes("You've been removed from the speaking queue") || text.includes("Hand lowered"))) this.setHandVisible(false);
+    if (text.length < 500 && text.includes("Speaking queue cleared")) {
+      this.remoteQueueByUserId = new Map();
+      this.setHandVisible(false);
+      this.scheduleScanVideos();
+    }
     if (hasPos) {
+      const isStateMessage = text.includes("No one has their hand raised") ||
+        text.includes("raised their hand") ||
+        text.includes("have their hand raised");
+      if (!isStateMessage) return;
       const posMap = parsePosMarker(text);
       if (posMap !== null) {
-        this.remoteQueueByUserId = new Map(posMap);
-        this.scanVideos();
-        if (posMap.size === 0) this.setHandVisible(false);
-        else {
+        if (posMap.size === 0) {
+          if (text.includes("No one has their hand raised")) {
+            this.remoteQueueByUserId = new Map(posMap);
+            this.setHandVisible(false);
+            this.scheduleScanVideos();
+          }
+        } else {
+          this.remoteQueueByUserId = new Map(posMap);
+          this.scheduleScanVideos();
           const myId = getCurrentUserId();
           if (myId) {
             const myIdNorm = String(myId).trim();
@@ -586,19 +660,27 @@ module.exports = class RaiseHand {
         for (const node of m.addedNodes) {
           if (node && node.nodeType) pendingNodes.push(node);
         }
+        if (m.type === "characterData" && m.target) {
+          const el = m.target.nodeType === Node.TEXT_NODE ? m.target.parentElement : m.target;
+          if (el) pendingNodes.push(el);
+        }
       }
       if (pendingNodes.length === 0) return;
       if (messageScanTimer) clearTimeout(messageScanTimer);
       messageScanTimer = setTimeout(flushMessageScan, 200);
     };
     this.messageObserver = new MutationObserver(onMutations);
-    const opts = { childList: true, subtree: true };
+    const opts = { childList: true, subtree: true, characterData: true, characterDataOldValue: false };
     const app = document.getElementById("app-mount");
     if (app) this.messageObserver.observe(app, opts);
     if (document.body && document.body !== app) this.messageObserver.observe(document.body, opts);
     setTimeout(() => {
       if (app) scanTree(app);
     }, 1500);
+    this._messageScanInterval = setInterval(() => {
+      const root = document.getElementById("app-mount");
+      if (root) scanTree(root);
+    }, 8000);
   }
 
   start() {
@@ -606,13 +688,8 @@ module.exports = class RaiseHand {
     this.observeMessages();
     const app = document.getElementById("app-mount");
     if (app) {
-      let videoScanTimer = null;
       this.observer = new MutationObserver(() => {
-        if (videoScanTimer) clearTimeout(videoScanTimer);
-        videoScanTimer = setTimeout(() => {
-          videoScanTimer = null;
-          this.scanVideos();
-        }, 120);
+        this.scheduleScanVideos();
       });
       this.observer.observe(app, { childList: true, subtree: true });
     }
@@ -698,6 +775,14 @@ module.exports = class RaiseHand {
   }
 
   stop() {
+    if (this._scanVideosTimer) {
+      clearTimeout(this._scanVideosTimer);
+      this._scanVideosTimer = null;
+    }
+    if (this._messageScanInterval) {
+      clearInterval(this._messageScanInterval);
+      this._messageScanInterval = null;
+    }
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
