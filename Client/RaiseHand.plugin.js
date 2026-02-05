@@ -612,10 +612,6 @@ module.exports = class RaiseHand {
       this.scheduleScanVideos();
     }
     if (hasPos) {
-      const isStateMessage = text.includes("No one has their hand raised") ||
-        text.includes("raised their hand") ||
-        text.includes("have their hand raised");
-      if (!isStateMessage) return;
       const posMap = parsePosMarker(text);
       if (posMap !== null) {
         if (posMap.size === 0) {

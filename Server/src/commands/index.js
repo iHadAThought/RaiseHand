@@ -28,13 +28,24 @@ const stateMessageByChannel = new Map();
 /** Command channel ID -> Array<{ channelId, messageId }> of recent bot replies to delete when /clear is run */
 const recentBotRepliesByChannel = new Map();
 
-/** Delete the state message for this queue channel and remove from map. */
-async function deleteStateMessageForChannel(guild, commandChannelId) {
+/** Fetch channel by id, using cache or API. */
+async function getChannel(guild, channelId) {
+  const ch = guild.channels.cache.get(channelId);
+  if (ch) return ch;
+  try {
+    return await guild.channels.fetch(channelId);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Delete the state message for a given queue command-channel. */
+async function deleteStateMessageForCommandChannel(guild, commandChannelId) {
   const data = stateMessageByChannel.get(commandChannelId);
   if (!data) return;
   try {
-    const ch = data.channelId ? guild.channels.cache.get(data.channelId) : null;
-    if (ch) {
+    const ch = data.channelId ? await getChannel(guild, data.channelId) : null;
+    if (ch?.messages?.fetch) {
       const msg = await ch.messages.fetch(data.messageId).catch(() => null);
       if (msg) await msg.delete().catch(() => {});
     }
@@ -54,21 +65,36 @@ async function trackReplyForClear(interaction) {
   } catch (_) {}
 }
 
-/** Delete all tracked bot messages for this queue channel (state message + recent replies). */
-async function deleteAllBotMessagesForChannel(guild, commandChannelId) {
-  await deleteStateMessageForChannel(guild, commandChannelId);
-  const replies = recentBotRepliesByChannel.get(commandChannelId);
-  if (replies?.length) {
-    for (const { channelId, messageId } of replies) {
+/** Delete all bot messages in the given channel (where /clear was run). Finds state message and replies that are in this channel. */
+async function deleteAllBotMessagesForChannel(guild, channelIdWhereClearWasRun) {
+  await deleteStateMessageForCommandChannel(guild, channelIdWhereClearWasRun);
+  for (const [cmdChannelId, data] of stateMessageByChannel.entries()) {
+    if (data.channelId === channelIdWhereClearWasRun) {
       try {
-        const ch = guild.channels.cache.get(channelId);
-        if (ch) {
+        const ch = await getChannel(guild, data.channelId);
+        if (ch?.messages?.fetch) {
+          const msg = await ch.messages.fetch(data.messageId).catch(() => null);
+          if (msg) await msg.delete().catch(() => {});
+        }
+      } catch (_) {}
+      stateMessageByChannel.delete(cmdChannelId);
+      break;
+    }
+  }
+  for (const [cmdChannelId, replies] of recentBotRepliesByChannel.entries()) {
+    const inThisChannel = replies.filter((r) => r.channelId === channelIdWhereClearWasRun);
+    for (const { channelId, messageId } of inThisChannel) {
+      try {
+        const ch = await getChannel(guild, channelId);
+        if (ch?.messages?.fetch) {
           const msg = await ch.messages.fetch(messageId).catch(() => null);
           if (msg) await msg.delete().catch(() => {});
         }
       } catch (_) {}
     }
-    recentBotRepliesByChannel.delete(commandChannelId);
+    const remaining = replies.filter((r) => r.channelId !== channelIdWhereClearWasRun);
+    if (remaining.length === 0) recentBotRepliesByChannel.delete(cmdChannelId);
+    else recentBotRepliesByChannel.set(cmdChannelId, remaining);
   }
 }
 
